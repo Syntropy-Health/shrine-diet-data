@@ -39,5 +39,14 @@ via `download-sources → decompress → build-herbal-db → migrate-kg → migr
 - **PR-2 built** (branch `shrine-diet-bioactivity/pr2-t4-ingest-evidence`): T4.0 embedder benchmark,
   T4.1 additive guard, T4.2 evidence_tier, T4.3 ChEMBL ≥2-docs guard — each gated + receipted.
 - **ChEMBL population EXECUTED (2026-09-03, credential-free local):** compound_identity 8,325 InChIKeys (PubChem); `bioactivity_evidence` **10,739 rows** (was 0) after the T4.3 guard kept 1,494/7,335 pairs from 18,281 bioactivities; HAS_EVIDENCE edges all `evidence_tier=assay`. Graph write (HAS_EVIDENCE into Aura) is the ingest step (T4.1-guarded).
-- Real-Aura / Voyage runs gated on an Infisical grant (identity `dd351bcf`, project `687cab01`,
-  `/research/shrine-diet-bioactivity`). Local dev (bge-m3 + local Neo4j) is credential-free.
+- **Embeddings (2026-09-05 decision):** local dev = **bge-m3** (LM Studio, credential-free);
+  external/prod arm = **Gemini / Vertex AI** embeddings (project `syntropyhealth-shrine`, via ADC /
+  gcloud) — **Voyage AI is dismissed entirely** (we already have Google/Vertex access; no free-tier
+  rate limit to work around).
+- **Aura credential retrieval (2026-09-05):** the real-Aura ingest no longer needs the `687cab01`
+  Infisical grant. Retrieve the DB connection via the **Neo4j Aura management API** (OAuth
+  client-credentials with `AURA_CLIENT_ID` / `AURA_CLIENT_SECRET` from zshenv →
+  `POST api.neo4j.io/oauth/token` → `GET /v1/instances`), then **sync** `NEO4J_URI/USERNAME/PASSWORD/
+  DATABASE` into Infisical **App project `589d1e3b` (`SyntropyHealth App`), `/research/shrine-diet-bioactivity`**.
+  _Blocked 2026-09-05: the zshenv Aura API pair returns HTTP 401 `access_denied` (matched-pair rejection,
+  not a format issue) — awaiting a regenerated Aura API credential._
