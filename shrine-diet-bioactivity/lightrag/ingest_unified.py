@@ -524,6 +524,15 @@ async def main() -> None:
                 host=embedding_host,
             ),
         )
+    elif embedding_binding in ("vertex", "aistudio", "local"):
+        # T4.0 pluggable embedder arm: bge-m3 (local) vs Gemini (vertex/aistudio),
+        # one interface behind embedder_adapters.make_embedder. LLM func stays the
+        # shared local/openrouter one — embedder and LLM are independent.
+        from embedder_adapters import make_embedder, to_embedding_func
+
+        llm_func = lightrag_init.make_llm_func()
+        embed_func = to_embedding_func(make_embedder(embedding_binding))
+        print(f"Embedder adapter: {make_embedder(embedding_binding).name}")
     else:
         # Shared openai-binding LLM func (LLM_MODEL from env) with the
         # json_object -> json_schema response_format shim for local

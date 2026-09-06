@@ -47,8 +47,17 @@ via `download-sources → decompress → build-herbal-db → migrate-kg → migr
   creds are **non-default** and must be read from the canonical `687cab01 /research/shrine-diet-bioactivity`:
   `NEO4J_USERNAME=b7dbceab` and `NEO4J_DATABASE=b7dbceab` (NOT the Aura default `neo4j`), password unchanged.
   (Fixed a latent `687cab01` bug: `NEO4J_DATABASE` was `neo4j`, masked by default-home-db routing.)
-- **HAS_EVIDENCE population EXECUTED on Aura (2026-09-05):** additive-guarded write of **10,739
-  BioactivityEvidence nodes + 10,739 HAS_EVIDENCE edges** (Compound→BioactivityEvidence), all
-  `evidence_tier=assay` on the wire. Zero orphans (Compound stayed 104,378); additive guard passed. Deferred:
-  **EVIDENCE_FOR_TARGET** (10,739 edges) — 225/735 Target endpoints absent from the graph, needs a create-vs-enrich
-  decision. **Gemini/Vertex embedding arm (T4.0)** — separate, not yet run.
+- **Bioactivity subgraph EXECUTED on Aura (2026-09-05), additive-guarded, both writes:**
+  - **HAS_EVIDENCE**: 10,739 BioactivityEvidence nodes + 10,739 edges (Compound→BioactivityEvidence),
+    all `evidence_tier=assay` on the wire; zero orphans (Compound stayed 104,378).
+  - **EVIDENCE_FOR_TARGET**: 225 missing Target endpoints created **enriched** from ChEMBL metadata
+    (target_type/organism/chembl_id) → Target 14,351→14,576, then 10,739 edges (1,807 would have dropped
+    without the enriched targets). Full chain live: Compound→HAS_EVIDENCE→BioactivityEvidence→EVIDENCE_FOR_TARGET→Target.
+  - Note: `upsert_relationships` MATCHes endpoints (never MERGE-creates) → it drops edges to missing
+    nodes rather than making orphans; completeness comes from upserting the endpoint entities first.
+- **T4.0 embedder adapter (2026-09-05, BUILT):** `lightrag/embedder_adapters.py` — pluggable
+  `EmbedderAdapter` interface + factory (`local` bge-m3 openai-compat · `vertex` Gemini via ADC ·
+  `aistudio` Gemini via API key), wired into `ingest_unified` (opt-in binding). 7 unit tests pass;
+  Vertex adapter constructs + authenticates via ADC. ⚠️ **Vertex runtime blocked on GCP billing** —
+  `embed()` returns `403 PERMISSION_DENIED (billing not enabled)` on project `syntropyhealth-shrine`.
+  Unblock: enable billing on that project, OR use the `aistudio` binding with a Gemini API key (free tier).
