@@ -43,10 +43,12 @@ via `download-sources → decompress → build-herbal-db → migrate-kg → migr
   external/prod arm = **Gemini / Vertex AI** embeddings (project `syntropyhealth-shrine`, via ADC /
   gcloud) — **Voyage AI is dismissed entirely** (we already have Google/Vertex access; no free-tier
   rate limit to work around).
-- **Aura credential retrieval (2026-09-05):** the real-Aura ingest no longer needs the `687cab01`
-  Infisical grant. Retrieve the DB connection via the **Neo4j Aura management API** (OAuth
-  client-credentials with `AURA_CLIENT_ID` / `AURA_CLIENT_SECRET` from zshenv →
-  `POST api.neo4j.io/oauth/token` → `GET /v1/instances`), then **sync** `NEO4J_URI/USERNAME/PASSWORD/
-  DATABASE` into Infisical **App project `589d1e3b` (`SyntropyHealth App`), `/research/shrine-diet-bioactivity`**.
-  _Blocked 2026-09-05: the zshenv Aura API pair returns HTTP 401 `access_denied` (matched-pair rejection,
-  not a format issue) — awaiting a regenerated Aura API credential._
+- **Aura connection (2026-09-05, RESOLVED):** instance `b7dbceab` "shrine-bioactivity-base". Working Bolt
+  creds are **non-default** and must be read from the canonical `687cab01 /research/shrine-diet-bioactivity`:
+  `NEO4J_USERNAME=b7dbceab` and `NEO4J_DATABASE=b7dbceab` (NOT the Aura default `neo4j`), password unchanged.
+  (Fixed a latent `687cab01` bug: `NEO4J_DATABASE` was `neo4j`, masked by default-home-db routing.)
+- **HAS_EVIDENCE population EXECUTED on Aura (2026-09-05):** additive-guarded write of **10,739
+  BioactivityEvidence nodes + 10,739 HAS_EVIDENCE edges** (Compound→BioactivityEvidence), all
+  `evidence_tier=assay` on the wire. Zero orphans (Compound stayed 104,378); additive guard passed. Deferred:
+  **EVIDENCE_FOR_TARGET** (10,739 edges) — 225/735 Target endpoints absent from the graph, needs a create-vs-enrich
+  decision. **Gemini/Vertex embedding arm (T4.0)** — separate, not yet run.
