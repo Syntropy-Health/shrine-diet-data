@@ -141,28 +141,44 @@ class GeminiAIStudioAdapter(_GeminiAdapterBase):
 class LocalOpenAICompatAdapter(EmbedderAdapter):
     """bge-m3 (or any model) via an OpenAI-compatible /embeddings endpoint.
 
-    Reuses the float-encoding, order-preserving ``_openai_compat_embed`` in
-    ingest_unified rather than re-implementing it — lightrag's bundled openai_embed
-    forces base64 encoding, which some local servers reject.
+    Self-contained (httpx), float-encoded, order-preserving. Deliberately does NOT
+    reuse ingest_unified's ``_openai_compat_embed`` — that would couple the adapter to
+    the heavy ingest module (lightrag_init at import). float encoding is required
+    because lightrag's bundled openai_embed forces base64, which some local servers
+    reject. The response is re-sorted by the ``index`` field before trusting order.
     """
 
     def __init__(self, model: str, dim: int, base_url: str, api_key: str | None) -> None:
         self.name = f"local:{model}@{base_url}"
         self.embedding_dim = int(dim)
         self._model = model
-        self._base_url = base_url
+        self._base_url = base_url.rstrip("/")
         self._api_key = api_key or "not-needed"
 
     async def embed(self, texts: Sequence[str]) -> "np.ndarray":
-        from ingest_unified import _openai_compat_embed  # lazy: avoids import cycle at load
+        import httpx
+        import numpy as np
 
-        return await _openai_compat_embed(
-            list(texts),
-            model=self._model,
-            base_url=self._base_url,
-            api_key=self._api_key,
-            embedding_dim=self.embedding_dim,
-        )
+        texts = list(texts)
+        if not texts:
+            return np.zeros((0, self.embedding_dim), dtype=np.float32)
+        payload = {"model": self._model, "input": texts, "encoding_format": "float"}
+        headers = {"Authorization": f"Bearer {self._api_key}"}
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{self._base_url}/embeddings", json=payload, headers=headers
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data")
+        if not data:
+            raise RuntimeError(f"{self.name}: embeddings endpoint returned no data")
+        # Re-sort by index: a server that reorders would misalign the whole batch.
+        ordered = sorted(data, key=lambda d: d.get("index", 0))
+        if len(ordered) != len(texts):
+            raise RuntimeError(
+                f"{self.name}: got {len(ordered)} embeddings for {len(texts)} inputs"
+            )
+        return np.asarray([d["embedding"] for d in ordered], dtype=np.float32)
 
 
 # Bindings this factory OWNS. ollama stays on ingest_unified's native path (it uses a

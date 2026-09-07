@@ -61,3 +61,8 @@ via `download-sources → decompress → build-herbal-db → migrate-kg → migr
   Vertex adapter constructs + authenticates via ADC. ⚠️ **Vertex runtime blocked on GCP billing** —
   `embed()` returns `403 PERMISSION_DENIED (billing not enabled)` on project `syntropyhealth-shrine`.
   Unblock: enable billing on that project, OR use the `aistudio` binding with a Gemini API key (free tier).
+- **T4.0 benchmark EXECUTED (2026-09-07)** — both arms through the adapter, 50 compound–target evidence
+  pairs, retrieval self-consistency: **bge-m3 (local)** recall@1 0.94 / MRR 0.97 @1.75s (free, offline);
+  **gemini-embedding-001 (aistudio)** recall@1 1.00 / MRR 1.00 @3.81s. Both strong; default to local
+  bge-m3 for cost, Gemini for max precision. Full results:
+  `research-journal/results/t40-embedder-benchmark-20260907.{md,json}`.

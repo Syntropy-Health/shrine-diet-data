@@ -1,0 +1,21 @@
+{
+  "n": 50,
+  "results": [
+    {
+      "name": "local:text-embedding-bge-m3@http://localhost:1234/v1",
+      "dim": 1024,
+      "latency_s": 1.75,
+      "recall@1": 0.94,
+      "recall@3": 1.0,
+      "MRR": 0.97
+    },
+    {
+      "name": "aistudio:gemini-embedding-001",
+      "dim": 1024,
+      "latency_s": 3.81,
+      "recall@1": 1.0,
+      "recall@3": 1.0,
+      "MRR": 1.0
+    }
+  ]
+}
