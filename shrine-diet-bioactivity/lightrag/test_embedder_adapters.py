@@ -61,11 +61,11 @@ def test_vertex_constructs_and_names_itself(monkeypatch):
     pytest.importorskip("google.genai")
     monkeypatch.setenv("EMBEDDING_MODEL", "gemini-embedding-001")
     monkeypatch.setenv("EMBEDDING_DIM", "768")
-    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "syntropyhealth-shrine")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "syntropy-passport")
     a = make_embedder("vertex")
     assert isinstance(a, GeminiVertexAdapter)
     assert a.embedding_dim == 768
-    assert a.name.startswith("vertex:gemini-embedding-001@syntropyhealth-shrine")
+    assert a.name.startswith("vertex:gemini-embedding-001@syntropy-passport")
 
 
 def test_vertex_requests_output_dim_only_for_gemini_embedding():

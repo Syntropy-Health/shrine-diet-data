@@ -23,7 +23,7 @@ Env contract (per binding):
     EMBEDDING_DIM              output dimensionality (int)
     EMBEDDING_BINDING_HOST     openai-compat base URL (local/ollama)
     EMBEDDING_BINDING_API_KEY  key for local openai-compat OR aistudio
-    GOOGLE_CLOUD_PROJECT       vertex project (default: syntropyhealth-shrine)
+    GOOGLE_CLOUD_PROJECT       vertex project (default: syntropy-passport)
     GOOGLE_CLOUD_LOCATION      vertex location (default: us-central1)
 """
 from __future__ import annotations
@@ -207,7 +207,7 @@ def make_embedder(binding: str | None = None) -> EmbedderAdapter:
         return GeminiVertexAdapter(
             model=model,
             dim=dim,
-            project=os.getenv("GOOGLE_CLOUD_PROJECT", "syntropyhealth-shrine"),
+            project=os.getenv("GOOGLE_CLOUD_PROJECT", "syntropy-passport"),
             location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"),
         )
     if binding == "aistudio":

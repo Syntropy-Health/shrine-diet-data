@@ -1,25 +1,25 @@
-# T4.0 Embedder Benchmark — local bge-m3 vs Gemini (2026-09-07)
+# T4.0 Embedder Benchmark — bge-m3 vs Gemini (Vertex + AI-Studio), 2026-09-07
 
 **Task:** retrieval self-consistency on **50 distinct compound–target bioactivity-evidence pairs**
-(from `bioactivity_evidence`, top-pChEMBL). For each pair, a paraphrased query
-("Is {compound} active on the {target} target?") must retrieve its own evidence
-description ("{compound} shows {act} activity against {target} (pChEMBL x)") as top-1
-by cosine, among all 50. Both arms run through the **same `EmbedderAdapter` interface**
-(`lightrag/embedder_adapters.py`).
+(top-pChEMBL from `bioactivity_evidence`). Paraphrased query ("Is {compound} active on the {target}
+target?") must retrieve its own evidence description as top-1 by cosine among all 50. All arms run
+through the **same `EmbedderAdapter`** (`lightrag/embedder_adapters.py`).
 
-| embedder | binding | dim | latency | recall@1 | recall@3 | MRR |
-|---|---|---|---|---|---|---|
-| bge-m3 (LM Studio) | `local` | 1024 | 1.75s | 0.94 | 1.00 | 0.97 |
-| gemini-embedding-001 | `aistudio` | 1024 | 3.81s¹ | 1.00 | 1.00 | 1.00 |
+| embedder | binding | project/auth | dim | latency | recall@1 | recall@3 | MRR |
+|---|---|---|---|---|---|---|---|
+| bge-m3 (LM Studio) | `local` | localhost, none | 1024 | 1.18s | 0.94 | 1.00 | 0.97 |
+| gemini-embedding-001 | `vertex` | syntropy-passport, ADC | 1024 | 4.44s | 1.00 | 1.00 | 1.00 |
+| gemini-embedding-001 | `aistudio` | AI-Studio API key | 1024 | 3.96s¹ | 1.00 | 1.00 | 1.00 |
 
-¹ includes a 0.5s inter-batch pause for free-tier rate limits; raw compute lower.
+¹ both hosted arms include a small inter-batch pause; raw compute lower.
 
-**Read:** both embedders are strong for this KG's retrieval. Gemini edges recall@1/MRR
-(1.00 vs 0.94/0.97); local bge-m3 is faster, **free, and offline** (no key, no billing).
-**Recommendation:** default to **local bge-m3** for dev/cost; reach for **Gemini** when
-maximum retrieval precision justifies the hosted call. Vertex arm (`vertex` binding, ADC)
-is code-ready but blocked on GCP billing for `syntropyhealth-shrine` — `aistudio` is the
-billing-free equivalent used here.
+**Read:** the two Gemini transports are identical in quality (same model) and differ only in
+auth/latency; local bge-m3 is marginally behind on recall@1 (0.94) but **~3× faster, free, and offline**.
+**Recommendation:** default **local bge-m3** for dev/cost; **`vertex`** (ADC, no key in env) for the
+hosted arm in prod, **`aistudio`** as the keyed fallback. All three are one `EMBEDDING_BINDING` flip apart.
 
-Method note: retrieval self-consistency is an intrinsic embedder-quality proxy (no
-ground-truth labels needed); it does not measure end-task DietResearchBench accuracy.
+**GCP project:** Vertex runs on **`syntropy-passport`** (or `shrine-longevity`) — NOT `syntropyhealth-shrine`
+(an earlier 403 "billing" was that wrong project; the correct projects are billing-enabled and embed fine).
+
+Method note: retrieval self-consistency is an intrinsic embedder-quality proxy; it is not end-task
+DietResearchBench accuracy.

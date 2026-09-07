@@ -57,12 +57,11 @@ via `download-sources → decompress → build-herbal-db → migrate-kg → migr
     nodes rather than making orphans; completeness comes from upserting the endpoint entities first.
 - **T4.0 embedder adapter (2026-09-05, BUILT):** `lightrag/embedder_adapters.py` — pluggable
   `EmbedderAdapter` interface + factory (`local` bge-m3 openai-compat · `vertex` Gemini via ADC ·
-  `aistudio` Gemini via API key), wired into `ingest_unified` (opt-in binding). 7 unit tests pass;
-  Vertex adapter constructs + authenticates via ADC. ⚠️ **Vertex runtime blocked on GCP billing** —
-  `embed()` returns `403 PERMISSION_DENIED (billing not enabled)` on project `syntropyhealth-shrine`.
-  Unblock: enable billing on that project, OR use the `aistudio` binding with a Gemini API key (free tier).
-- **T4.0 benchmark EXECUTED (2026-09-07)** — both arms through the adapter, 50 compound–target evidence
-  pairs, retrieval self-consistency: **bge-m3 (local)** recall@1 0.94 / MRR 0.97 @1.75s (free, offline);
-  **gemini-embedding-001 (aistudio)** recall@1 1.00 / MRR 1.00 @3.81s. Both strong; default to local
-  bge-m3 for cost, Gemini for max precision. Full results:
-  `research-journal/results/t40-embedder-benchmark-20260907.{md,json}`.
+  `aistudio` Gemini via API key), wired into `ingest_unified` (opt-in binding). 7 unit tests pass.
+  ⚠️ **Vertex GCP project = `syntropy-passport`** (this case) **or `shrine-longevity`** — NOT
+  `syntropyhealth-shrine` (gcloud's default, not Vertex-billing-enabled → a 403 "billing" red herring).
+- **T4.0 benchmark EXECUTED (2026-09-07), 3 arms through the adapter** — 50 compound–target evidence pairs,
+  retrieval self-consistency: **bge-m3 (local)** recall@1 0.94 / MRR 0.97 @1.18s (free, offline);
+  **gemini-embedding-001 (vertex@syntropy-passport, ADC)** 1.00 / 1.00 @4.44s;
+  **gemini-embedding-001 (aistudio)** 1.00 / 1.00 @3.96s. Default local bge-m3 for cost, `vertex` for the
+  hosted arm. Full results: `research-journal/results/t40-embedder-benchmark-20260907.{md,json}`.
