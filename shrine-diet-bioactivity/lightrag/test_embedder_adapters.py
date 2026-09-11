@@ -98,3 +98,15 @@ def test_local_binding_allowed_on_explore_workspace():
     from embedder_adapters import assert_binding_allowed_for_workspace
     # a non-production (exploratory) workspace may use local bge-m3
     assert assert_binding_allowed_for_workspace("local", "unified_diet_kg_explore") is None
+
+
+def test_embed_entrypoint_is_deepcopy_atomic():
+    # LightRAG's constructor runs dataclasses.asdict(self) -> deepcopy over the
+    # embedding func. The func handed to it MUST be deepcopy-atomic: a module-level
+    # function copies by reference (is-identity), whereas a bound method deep-copies
+    # its __self__ (the adapter + its non-copyable genai client) and dies. This
+    # guards the fix without importing lightrag (dir-name shadows the pkg under pytest).
+    import copy
+    from embedder_adapters import _active_embed
+
+    assert copy.deepcopy(_active_embed) is _active_embed  # module-level -> atomic

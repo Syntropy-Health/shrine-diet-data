@@ -257,12 +257,36 @@ def assert_binding_allowed_for_workspace(binding: str | None, workspace: str) ->
         )
 
 
+# The active adapter, referenced by the MODULE-LEVEL embed entrypoint below.
+# Why a module global instead of passing ``adapter.embed`` directly: LightRAG's
+# constructor runs ``asdict(self)`` (dataclasses.asdict → deepcopy) over all fields,
+# including the embedding func. deepcopy of a BOUND METHOD deep-copies its
+# ``__self__`` (the whole adapter, incl. a non-copyable genai client) and dies. A
+# module-level function is deepcopy-atomic (copied by reference), so the func field
+# survives asdict — the same reason the ollama/openai paths pass a partial over a
+# module-level function rather than a bound method.
+_ACTIVE_ADAPTER: EmbedderAdapter | None = None
+
+
+async def _active_embed(texts):
+    if _ACTIVE_ADAPTER is None:  # pragma: no cover - guarded by to_embedding_func
+        raise RuntimeError("no active embedder adapter — call to_embedding_func first")
+    return await _ACTIVE_ADAPTER.embed(texts)
+
+
 def to_embedding_func(adapter: EmbedderAdapter, max_token_size: int = 8192):
-    """Wrap an adapter into lightrag's ``EmbeddingFunc`` so ingest wiring is unchanged."""
+    """Wrap an adapter into lightrag's ``EmbeddingFunc`` so ingest wiring is unchanged.
+
+    Registers ``adapter`` as the module-active adapter and hands LightRAG the
+    module-level ``_active_embed`` (deepcopy-safe), NOT ``adapter.embed`` (a bound
+    method that breaks LightRAG's ``asdict(self)`` deepcopy).
+    """
+    global _ACTIVE_ADAPTER
+    _ACTIVE_ADAPTER = adapter
     from lightrag.utils import EmbeddingFunc  # lazy
 
     return EmbeddingFunc(
         embedding_dim=adapter.embedding_dim,
         max_token_size=max_token_size,
-        func=adapter.embed,
+        func=_active_embed,
     )
