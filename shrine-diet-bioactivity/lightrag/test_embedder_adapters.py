@@ -77,3 +77,24 @@ def test_vertex_requests_output_dim_only_for_gemini_embedding():
     assert a._config() is None
     a._model = "gemini-embedding-001"; a.embedding_dim = 1536
     assert a._config() == {"output_dimensionality": 1536}
+
+
+# ---- router guard: embedder<->workspace binding (pre-emptive) ----
+
+def test_local_binding_refused_on_production_workspace():
+    from embedder_adapters import assert_binding_allowed_for_workspace
+    with pytest.raises(SystemExit, match="router-guard"):
+        assert_binding_allowed_for_workspace("local", "unified_diet_kg")
+
+
+def test_hosted_binding_allowed_on_production_workspace():
+    from embedder_adapters import assert_binding_allowed_for_workspace
+    # vertex / aistudio are reachable at query time -> allowed on the prod workspace
+    assert assert_binding_allowed_for_workspace("vertex", "unified_diet_kg") is None
+    assert assert_binding_allowed_for_workspace("aistudio", "unified_diet_kg") is None
+
+
+def test_local_binding_allowed_on_explore_workspace():
+    from embedder_adapters import assert_binding_allowed_for_workspace
+    # a non-production (exploratory) workspace may use local bge-m3
+    assert assert_binding_allowed_for_workspace("local", "unified_diet_kg_explore") is None

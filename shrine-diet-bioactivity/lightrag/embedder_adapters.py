@@ -227,6 +227,36 @@ def make_embedder(binding: str | None = None) -> EmbedderAdapter:
     )
 
 
+# Bindings whose embedder is reachable from the deployed gateway at QUERY time.
+# The local (bge-m3) binding is unreachable from Railway, so a production
+# workspace queried by the deployed gateway must not be bound to it.
+HOSTED_BINDINGS = frozenset({"vertex", "aistudio"})
+
+# Workspaces the deployed gateway queries. Their embedding space MUST be a hosted
+# embedder, or the semantic shape is queryable only from this machine.
+PRODUCTION_WORKSPACES = frozenset({"unified_diet_kg"})
+
+
+def assert_binding_allowed_for_workspace(binding: str | None, workspace: str) -> None:
+    """Pre-emptive router guard: refuse a local embedder against a production workspace.
+
+    ``assert_workspace_embedding`` catches an embedder MISMATCH — but only AFTER a
+    first ingest has written ``WorkspaceMeta``. This closes the window before it:
+    a local (bge-m3) ingest into ``unified_diet_kg`` would set the production
+    workspace's space to an embedder the Railway-deployed gateway cannot reach at
+    query time, making the semantic shape queryable only locally. Local bge-m3
+    belongs on a SEPARATE (exploratory) workspace. Fail closed, loud, with the why.
+    """
+    binding = (binding or os.getenv("EMBEDDING_BINDING", "local")).lower()
+    if workspace in PRODUCTION_WORKSPACES and binding not in HOSTED_BINDINGS:
+        raise SystemExit(
+            f"[router-guard] refusing EMBEDDING_BINDING={binding!r} against production "
+            f"workspace {workspace!r}: its semantic space must be a HOSTED embedder "
+            f"({sorted(HOSTED_BINDINGS)}) so the deployed gateway can embed queries "
+            f"against it. Use a separate workspace (e.g. '{workspace}_explore') for local bge-m3."
+        )
+
+
 def to_embedding_func(adapter: EmbedderAdapter, max_token_size: int = 8192):
     """Wrap an adapter into lightrag's ``EmbeddingFunc`` so ingest wiring is unchanged."""
     from lightrag.utils import EmbeddingFunc  # lazy

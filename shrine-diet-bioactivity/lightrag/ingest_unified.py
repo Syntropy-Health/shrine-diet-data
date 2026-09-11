@@ -572,6 +572,15 @@ async def main() -> None:
     print(f"  Graph storage: {graph_storage}")
     print(f"  Workspace: {workspace}")
 
+    # Router guard (pre-emptive): refuse a local (bge-m3) embedder against a
+    # production workspace BEFORE any WorkspaceMeta is written — the deployed
+    # gateway cannot reach a local embedder at query time. Only meaningful for
+    # the adapter-owned bindings; ollama/native paths are unaffected.
+    if embedding_binding in ("vertex", "aistudio", "local", "openai"):
+        from embedder_adapters import assert_binding_allowed_for_workspace
+
+        assert_binding_allowed_for_workspace(embedding_binding, workspace)
+
     # Workspace <-> embedding-space guard: refuse to ingest vectors of a
     # different embedding model/dim into a Neo4j-backed workspace.
     # Case-insensitive so a storage-class rename (Neo4j vs Neo4J) cannot make
