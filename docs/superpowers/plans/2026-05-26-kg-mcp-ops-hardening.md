@@ -1069,7 +1069,7 @@ def test_herb_to_symptoms_returns_provenance_tagged_chain(mcp_call):
 ```bash
 cd mcp
 export KG_MCP_E2E_URL=https://kg-mcp-test.up.railway.app
-export KG_MCP_API_KEY=mcp_yAY14k2VnO5oBuGCY06nqq0QqHKafetBoOk5St0XmRE
+export KG_MCP_API_KEY="$KG_MCP_API_KEY"   # ROTATED 2026-08-27 — pull from Infisical, never inline
 uv run pytest -m integration tests/integration/ -v --no-header 2>&1 | tail -15
 ```
 Expected: all 3 tests PASS. (The third test relies on SYN-88 being fixed — if Phase 2's fix hasn't deployed to Railway yet, point at a local gateway instead by setting `KG_MCP_E2E_URL=http://localhost:8080` after starting the Python kg_mcp gateway locally per `mcp/README.md` § "Run locally".)

@@ -192,7 +192,11 @@ jobs:
           fi
 
       - name: Install Railway CLI
-        run: npm install -g @railway/cli@latest
+        # Pinned to the MAJOR the JSON shape was measured against (5.13.2,
+        # 2026-08-27). railway_deployment.py parses `deployment list --json`;
+        # pinning the parser to a measured shape while letting the producer
+        # float on @latest leaves the two free to diverge silently.
+        run: npm install -g @railway/cli@5
 
       - name: Sync Braintrust env to Railway service
         # Push BRAINTRUST_API_KEY + BRAINTRUST_PROJECT to the Railway service
@@ -216,6 +220,41 @@ jobs:
           railway variables --service "${{ env.RAILWAY_SERVICE }}" --environment "$ENV_NAME" \
             --set "BRAINTRUST_PROJECT=shrine-diet-bioactivity" --skip-deploys
 
+      # Record which deployment is live BEFORE deploying. `railway up --detach`
+      # returns before the new deployment registers, so without this the
+      # "newest" deployment can still be the PREVIOUS one, carrying its own real
+      # SUCCESS. Comparing ids is what makes the status check mean anything.
+      # Record which deployment is live BEFORE deploying. `railway up --detach`
+      # returns before the new one registers, so without this the "newest"
+      # deployment can still be the PREVIOUS one carrying its own real SUCCESS.
+      # FAILS CLOSED: if we cannot read the current id we refuse to deploy
+      # blind. An empty prev disables the identity comparison entirely, which
+      # is exactly how the 2026-06-29 false-green worked.
+      - name: Capture current deployment id
+        id: prev_deploy
+        timeout-minutes: 3
+        shell: bash
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          ENV_NAME: ${{ needs.detect-environment.outputs.environment }}
+        run: |
+          set -o pipefail
+          RAW=$(railway deployment list --service "${{ env.RAILWAY_SERVICE }}" --environment "$ENV_NAME" --limit 20 --json) || {
+            echo "::error::railway deployment list failed — refusing to deploy without a baseline id"
+            exit 1
+          }
+          PREV=$(printf '%s' "$RAW" | python3 scripts/ci/railway_deployment.py newest-id) || {
+            echo "::error::could not read the current deployment id: $PREV"
+            exit 1
+          }
+          PREV=${PREV//[$'\n\r']/}
+          if [ -z "$PREV" ]; then
+            echo "::error::empty baseline deployment id — refusing to deploy blind"
+            exit 1
+          fi
+          echo "prev_id=$PREV" >> "$GITHUB_OUTPUT"
+          echo "baseline deployment: $PREV"
+
       - name: Deploy
         timeout-minutes: 15
         env:
@@ -224,7 +263,80 @@ jobs:
         run: |
           railway up --service "${{ env.RAILWAY_SERVICE }}" --environment "$ENV_NAME" --ci --detach
 
-      - name: Resolve service URL + wait for /health
+      # THE VERDICT — about the DEPLOYMENT, not the domain.
+      # Until 2026-08-27 the verdict came from polling https://$DOMAIN/health,
+      # which the LAST HEALTHY container answers when a new one crashes at boot.
+      # See scripts/ci/railway_deployment.py for the full history.
+      #
+      # Exit 1 (deployment terminally bad) and exit 4 (we could not read) are
+      # handled SEPARATELY and deliberately: only 1 authorises the destructive
+      # rollback. Treating "cannot tell" as "is bad" is how a transient API blip
+      # becomes `railway down` against a healthy container.
+      - name: Wait for deployment to reach a terminal state
+        id: deploy_status
+        timeout-minutes: 16
+        shell: bash
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          ENV_NAME: ${{ needs.detect-environment.outputs.environment }}
+          PREV_ID: ${{ steps.prev_deploy.outputs.prev_id }}
+          POLL_BUDGET_SECONDS: "780"
+          MAX_CONSECUTIVE_UNREADABLE: "3"
+        run: |
+          set -o pipefail
+          if [ -z "$PREV_ID" ]; then
+            echo "::error::PREV_ID is empty — the capture step did not wire through; refusing to judge"
+            exit 1
+          fi
+          DEADLINE=$(( $(date +%s) + POLL_BUDGET_SECONDS ))
+          UNREADABLE=0
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            RAW=$(railway deployment list --service "${{ env.RAILWAY_SERVICE }}" --environment "$ENV_NAME" --limit 20 --json 2>&1) || RAW=""
+            set +e
+            VERDICT=$(printf '%s' "$RAW" | python3 scripts/ci/railway_deployment.py assert "$PREV_ID")
+            RC=$?
+            set -e
+            case "$RC" in
+              0)
+                echo "deployment advanced and succeeded: $VERDICT"
+                echo "verdict=success" >> "$GITHUB_OUTPUT"
+                echo "deployment=${VERDICT//[$'\n\r']/}" >> "$GITHUB_OUTPUT"
+                exit 0 ;;
+              1)
+                echo "::error::deployment FAILED: $VERDICT"
+                echo "verdict=crashed" >> "$GITHUB_OUTPUT"
+                echo "deployment=${VERDICT//[$'\n\r']/}" >> "$GITHUB_OUTPUT"
+                exit 1 ;;
+              3)
+                UNREADABLE=0
+                echo "  waiting: $VERDICT"
+                sleep 10 ;;
+              4)
+                UNREADABLE=$((UNREADABLE + 1))
+                echo "::warning::unreadable poll ${UNREADABLE}/${MAX_CONSECUTIVE_UNREADABLE}: $VERDICT"
+                if [ "$UNREADABLE" -ge "$MAX_CONSECUTIVE_UNREADABLE" ]; then
+                  echo "::error::could not read deployment state ${UNREADABLE}x consecutively — NOT rolling back, state unknown"
+                  echo "verdict=unreadable" >> "$GITHUB_OUTPUT"
+                  exit 1
+                fi
+                sleep 10 ;;
+              *)
+                echo "::error::railway_deployment.py usage error (rc=$RC): $VERDICT"
+                echo "verdict=unreadable" >> "$GITHUB_OUTPUT"
+                exit 1 ;;
+            esac
+          done
+          echo "::error::deployment did not reach a terminal state within ${POLL_BUDGET_SECONDS}s"
+          echo "verdict=timeout" >> "$GITHUB_OUTPUT"
+          exit 1
+
+
+      # SECONDARY probe only. This step can NEVER again be the deploy verdict:
+      # it polls the service DOMAIN, which the previous container answers when a
+      # new one crashes. Kept because an unreachable domain after a SUCCESSFUL
+      # deployment is still worth failing on — but it now runs AFTER the
+      # deployment verdict has already decided whether anything shipped.
+      - name: Resolve service URL + wait for /health (secondary)
         id: health_check
         timeout-minutes: 8
         env:
@@ -255,25 +367,55 @@ jobs:
           echo "::error::Health check did not pass within 5 minutes"
           exit 1
 
-      - name: Rollback on health failure
-        if: steps.health_check.outcome == 'failure'
+      # `railway down` DELETES the most recent deployment. It must fire ONLY on
+      # positive evidence that the new deployment is terminally bad.
+      #
+      # Two ways to get this wrong, both of which take a healthy service down:
+      #   - firing on "we could not read the state" (verdict=unreadable): the
+      #     state is UNKNOWN, and a transient API blip would delete a good
+      #     container — the gate causing the outage it exists to prevent.
+      #   - firing on the poll timeout (verdict=timeout): if the new deployment
+      #     never registered, the most recent deployment IS the previous good
+      #     one, so the rollback deletes exactly what it meant to protect.
+      #
+      # So this gates on verdict == 'crashed' only. Before 2026-08-27 the step
+      # was keyed to `steps.health_check.outcome == 'failure'` with no status
+      # function, which GitHub implicitly ANDs with success() — it was doubly
+      # disabled and could never run at all.
+      - name: Rollback on a confirmed bad deployment
+        if: always() && steps.deploy_status.outputs.verdict == 'crashed'
         continue-on-error: true
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           ENV_NAME: ${{ needs.detect-environment.outputs.environment }}
+          DEPLOYMENT: ${{ steps.deploy_status.outputs.deployment }}
         run: |
-          echo "::warning::Health check failed — removing failed deployment"
+          echo "::warning::confirmed bad deployment ($DEPLOYMENT) — removing it"
           railway down --service "${{ env.RAILWAY_SERVICE }}" --environment "$ENV_NAME" --yes
 
       - name: Deployment summary
         if: always()
+        # Values reach bash through env:, NOT by ${{ }} interpolation into the
+        # run: body. The domain is attacker-influenceable (it comes from
+        # `railway status --json` -> resolve_railway_domain.sh with no charset
+        # validation), and ${{ }} is substituted BEFORE bash parses the line, so
+        # a metacharacter in it would break out of the quotes and execute on a
+        # runner holding a credentialed checkout.
+        env:
+          ENV_NAME: ${{ needs.detect-environment.outputs.environment }}
+          HEALTH_URL: ${{ steps.health_check.outputs.url }}
+          HEALTH_OUTCOME: ${{ steps.health_check.outcome }}
+          DEPLOY_VERDICT: ${{ steps.deploy_status.outputs.verdict }}
+          DEPLOYMENT: ${{ steps.deploy_status.outputs.deployment }}
         run: |
-          ENV="${{ needs.detect-environment.outputs.environment }}"
-          URL="${{ steps.health_check.outputs.url }}"
+          ENV="$ENV_NAME"
+          URL="$HEALTH_URL"
           echo "## Deployment summary" >> $GITHUB_STEP_SUMMARY
           echo "Environment: \`$ENV\`" >> $GITHUB_STEP_SUMMARY
           echo "Service: \`${{ env.RAILWAY_SERVICE }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "Health: \`${{ steps.health_check.outcome }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Deployment: \`${DEPLOYMENT:-<none>}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Deploy verdict: \`${DEPLOY_VERDICT:-<none>}\` (authoritative)" >> $GITHUB_STEP_SUMMARY
+          echo "Health (secondary): \`$HEALTH_OUTCOME\`" >> $GITHUB_STEP_SUMMARY
           if [ -n "$URL" ]; then
             echo "URL: $URL" >> $GITHUB_STEP_SUMMARY
           fi

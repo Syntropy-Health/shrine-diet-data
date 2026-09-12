@@ -12,8 +12,11 @@ Two pieces of behavior locked in here:
 """
 from __future__ import annotations
 
+import importlib.util
+import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -30,6 +33,7 @@ COMPLETENESS_TEST = (
     / "shrine-diet-bioactivity/lightrag/tests/test_kg_completeness_gates.py"
 )
 RESOLVE_SCRIPT = REPO_ROOT / "scripts/ci/resolve_railway_domain.sh"
+RAILWAY_DEPLOY_PY = REPO_ROOT / "scripts/ci/railway_deployment.py"
 
 
 def _detect_env_run() -> str:
@@ -275,3 +279,292 @@ class TestCompletenessGatesHasMarker:
         assert "integration" in text, (
             "completeness gates need the local KG DB → mark `integration`."
         )
+
+
+# ─── deployment-advanced gate ─────────────────────────────────────────────
+
+_spec = importlib.util.spec_from_file_location("railway_deployment", RAILWAY_DEPLOY_PY)
+rdep = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(rdep)
+
+# MEASURED fixture: real `railway deployment list --json` (kg-mcp, 2026-08-27,
+# keys only / values redacted). Top-level BARE LIST, newest-first, keyed
+# id/status/createdAt/meta. RECORDED, not drift-detecting — no test can tell if
+# Railway changes the shape tomorrow; the point is that both subcommands share
+# one parser, so drift cannot affect one read and not the other.
+REAL_SHAPE = [
+    {"id": "dep-newest", "status": "SUCCESS", "createdAt": "2026-08-27T09:00:00.000Z",
+     "meta": {"buildLogs": "...", "image": {"digest": "sha256:..."},
+              # adversarial decoy: a parser that walks nested dicts would find
+              # this and pick a deployment that does not exist.
+              "id": "dep-DECOY", "status": "SUCCESS", "createdAt": "2099-01-01T00:00:00Z"}},
+    {"id": "dep-older", "status": "FAILED", "createdAt": "2026-08-26T09:00:00.000Z", "meta": {}},
+    {"id": "dep-oldest", "status": "REMOVED", "createdAt": "2026-06-04T09:00:00.000Z", "meta": {}},
+]
+
+ALL_SHAPES = {
+    "bare-list": REAL_SHAPE,
+    "deployments-list": {"deployments": REAL_SHAPE},
+    "deployments-edges": {"deployments": {"edges": [{"node": r} for r in REAL_SHAPE]}},
+    "deployments-single-dict": {"deployments": REAL_SHAPE[0]},
+    "deployment-singular": {"deployment": REAL_SHAPE[0]},
+}
+
+
+class TestRailwayDeploymentGate:
+    """scripts/ci/railway_deployment.py — the gate that replaced a /health poll
+    which could not fail.
+
+    assert exits: 0 advanced+SUCCESS / 1 advanced+terminal-BAD (rollback-safe) /
+    2 usage / 3 not-yet / 4 UNREADABLE (fail, do NOT roll back).
+    newest-id exits: 0 with id or NONE / 4 unreadable.
+    """
+
+    def _assert(self, payload, prev=""):
+        raw = payload if isinstance(payload, str) else json.dumps(payload)
+        try:
+            return rdep.assert_advanced(raw, prev)
+        except rdep.Unreadable as e:
+            return rdep.EXIT_UNREADABLE, f"- {e}"
+
+    def _newest(self, payload):
+        raw = payload if isinstance(payload, str) else json.dumps(payload)
+        try:
+            return rdep.EXIT_OK, rdep.newest_id(raw)
+        except rdep.Unreadable as e:
+            return rdep.EXIT_UNREADABLE, f"- {e}"
+
+    # ── THE PROPERTY THAT THE OLD TWO-HEREDOC VERSION VIOLATED ──
+    @pytest.mark.parametrize("name", sorted(ALL_SHAPES))
+    def test_both_modes_agree_on_every_shape(self, name):
+        """The original bug: two hand-copied parsers diverged, so --newest-id
+        returned '' where the verdict path found an id. Empty prev disables the
+        identity check -> live false GREEN. This property makes the divergence
+        impossible to reintroduce silently."""
+        payload = ALL_SHAPES[name]
+        rc_n, ident = self._newest(payload)
+        assert rc_n == rdep.EXIT_OK, f"{name}: newest-id failed: {ident}"
+        _, msg = self._assert(payload, prev="some-other-id")
+        assert msg.split()[0] == ident, (
+            f"{name}: newest-id said {ident!r} but assert classified {msg!r}")
+
+    @pytest.mark.parametrize("name", sorted(ALL_SHAPES))
+    def test_roundtrip_never_reports_success_on_an_unchanged_deployment(self, name):
+        """Feed the id we just captured back in: must be NOT-YET, never OK.
+        This single property kills every mutation that empties newest-id."""
+        payload = ALL_SHAPES[name]
+        _, prev = self._newest(payload)
+        rc, msg = self._assert(payload, prev=prev)
+        assert rc == rdep.EXIT_NOT_YET, f"{name}: expected NOT-YET, got {rc}: {msg}"
+        assert rc != rdep.EXIT_OK
+
+    # ── newest-id: previously ZERO coverage and fail-OPEN ──
+    @pytest.mark.parametrize("payload", ["", "   ", "garbage", "ERROR: unauthorized",
+                                         '{"unexpected":1}'])
+    def test_newest_id_fails_closed_never_silent_empty(self, payload):
+        rc, out = self._newest(payload)
+        assert rc == rdep.EXIT_UNREADABLE, f"must fail closed, got {rc}: {out}"
+
+    def test_newest_id_empty_list_is_NONE_not_an_error(self):
+        rc, out = self._newest([])
+        assert (rc, out) == (rdep.EXIT_OK, "NONE")
+
+    def test_NONE_sentinel_means_no_previous(self):
+        rc, _ = self._assert(REAL_SHAPE, prev="NONE")
+        assert rc == rdep.EXIT_OK
+
+    # ── the stale-read trap ──
+    def test_unchanged_id_with_old_SUCCESS_does_NOT_pass(self):
+        rc, msg = self._assert([REAL_SHAPE[0]], prev="dep-newest")
+        assert rc == rdep.EXIT_NOT_YET, msg
+
+    def test_prev_is_stripped_like_dep_id(self):
+        """dep_id was stripped and prev was not, so a trailing space or CR made
+        an UNCHANGED deployment compare as advanced -> exit 0 off a stale row."""
+        for prev in ("dep-newest ", " dep-newest", "dep-newest\r", "dep-newest\n"):
+            rc, msg = self._assert([REAL_SHAPE[0]], prev=prev)
+            assert rc == rdep.EXIT_NOT_YET, f"prev={prev!r} -> {rc}: {msg}"
+
+    # ── UNREADABLE (4) must be distinct from BAD (1): only 1 may roll back ──
+    @pytest.mark.parametrize("payload,prev", [
+        ("", "dep-old"), ("garbage", "dep-old"), ([], "dep-old"),
+        ([{"status": "SUCCESS"}], "dep-old"),
+        ([{"id": "dep-new"}], "dep-old"),
+        ([{"id": "dep-new", "status": "TELEPORTED"}], "dep-old"),
+    ])
+    def test_unreadable_is_4_not_1(self, payload, prev):
+        # LITERAL 4, not rdep.EXIT_UNREADABLE. Asserting against the symbol is
+        # vacuous: collapsing EXIT_UNREADABLE to 1 mutates the constant AND the
+        # expectation together, so the test compares the mutant to itself and
+        # passes. Found by mutation — the suite stayed green while "cannot tell"
+        # became "is bad", which is what arms `railway down` on a blip.
+        rc, msg = self._assert(payload, prev)
+        assert rc == 4, f"unreadable must be literal 4 (no rollback), got {rc}: {msg}"
+
+    def test_exit_code_literals_are_pinned(self):
+        """The workflow dispatches on `case "$RC" in 0|1|3|4)`. These numbers are
+        a cross-file contract, so pin the values, not just the names."""
+        assert (rdep.EXIT_OK, rdep.EXIT_BAD, rdep.EXIT_USAGE,
+                rdep.EXIT_NOT_YET, rdep.EXIT_UNREADABLE) == (0, 1, 2, 3, 4)
+
+    def test_terminal_bad_is_literal_1(self):
+        rc, _ = self._assert([{"id": "dep-new", "status": "CRASHED",
+                               "createdAt": "2026-08-27T09:00:00Z"}], "dep-old")
+        assert rc == 1, "rollback-authorising code must be literal 1"
+
+    def test_unreadable_always_emits_a_reason(self):
+        for payload in ("", "garbage", [], [{"id": "x", "status": "??"}]):
+            rc, msg = self._assert(payload, "dep-old")
+            assert rc == 4
+            assert msg.startswith("- ") and len(msg) > 2, f"no reason: {msg!r}"
+
+    def test_terminal_bad_is_1_so_rollback_can_arm(self):
+        for st in ("FAILED", "CRASHED", "REMOVED", "REMOVING", "SKIPPED"):
+            rc, msg = self._assert([{"id": "dep-new", "status": st,
+                                     "createdAt": "2026-08-27T09:00:00Z"}], "dep-old")
+            assert rc == rdep.EXIT_BAD, f"{st} -> {rc}: {msg}"
+
+    # ── status vocabulary closure: ONLY SUCCESS may exit 0 ──
+    @pytest.mark.parametrize("status", [
+        "BUILDING", "DEPLOYING", "INITIALIZING", "QUEUED", "WAITING",
+        "NEEDS_APPROVAL", "SLEEPING"])
+    def test_in_progress_is_3(self, status):
+        rc, msg = self._assert([{"id": "dep-new", "status": status,
+                                 "createdAt": "2026-08-27T09:00:00Z"}], "dep-old")
+        assert rc == rdep.EXIT_NOT_YET, f"{status} -> {rc}: {msg}"
+
+    def test_only_SUCCESS_can_exit_zero(self):
+        """Closure test: moving any other status into TERMINAL_OK is caught."""
+        vocab = (rdep.TERMINAL_OK | rdep.TERMINAL_BAD | rdep.IN_PROGRESS |
+                 {"TELEPORTED", "PENDING", "ACTIVE", "OK", "DONE", "LIVE"})
+        for st in vocab:
+            rc, _ = self._assert([{"id": "dep-new", "status": st,
+                                   "createdAt": "2026-08-27T09:00:00Z"}], "dep-old")
+            assert (rc == rdep.EXIT_OK) == (st == "SUCCESS"), f"{st} exited {rc}"
+
+    def test_status_is_normalised(self):
+        for st in ("success", " SUCCESS ", "Success"):
+            rc, _ = self._assert([{"id": "dep-new", "status": st,
+                                   "createdAt": "2026-08-27T09:00:00Z"}], "dep-old")
+            assert rc == rdep.EXIT_OK, st
+
+    # ── ordering / timestamp robustness ──
+    def test_picks_newest_by_createdAt_not_list_order(self):
+        rc, msg = self._assert(list(reversed(REAL_SHAPE)), prev="dep-older")
+        assert rc == rdep.EXIT_OK and "dep-newest" in msg, msg
+
+    def test_row_without_createdAt_is_not_demoted_below_a_stale_row(self):
+        """Sorting "" last would shove a just-created row below a stale SUCCESS.
+        When any row lacks a timestamp we trust the CLI's newest-first order."""
+        payload = [{"id": "dep-NEW", "status": "BUILDING"},
+                   {"id": "dep-OLD", "status": "SUCCESS", "createdAt": "2026-06-04T09:00:00Z"}]
+        rc, msg = self._assert(payload, prev="dep-OLD")
+        assert rc == rdep.EXIT_NOT_YET and "dep-NEW" in msg, msg
+
+    def test_non_string_createdAt_does_not_raise(self):
+        payload = [{"id": "a", "status": "SUCCESS", "createdAt": 1756000000},
+                   {"id": "b", "status": "SUCCESS", "createdAt": "2026-08-27T09:00:00Z"}]
+        rc, msg = self._assert(payload, "dep-old")
+        assert rc in (rdep.EXIT_OK, rdep.EXIT_UNREADABLE), msg
+        assert msg and not msg.startswith("Traceback")
+
+    def test_createdAt_ties_are_deterministic_in_either_order(self):
+        a = {"id": "dep-A", "status": "SUCCESS", "createdAt": "2026-08-27T09:00:00Z"}
+        b = {"id": "dep-B", "status": "CRASHED", "createdAt": "2026-08-27T09:00:00Z"}
+        first = self._assert([a, b], "dep-old")
+        second = self._assert([b, a], "dep-old")
+        assert first == second, f"tie resolved differently: {first} vs {second}"
+
+    def test_meta_decoy_is_not_followed(self):
+        _, msg = self._assert(REAL_SHAPE, prev="dep-older")
+        assert "dep-DECOY" not in msg, f"parser walked into meta: {msg}"
+
+    def test_usage_error_is_2(self):
+        proc = subprocess.run([sys.executable, str(RAILWAY_DEPLOY_PY)],
+                              input="", capture_output=True, text=True)
+        assert proc.returncode == rdep.EXIT_USAGE
+
+    def test_cli_entrypoint_matches_library(self):
+        """The workflow invokes the CLI; the tests above call the library. Pin
+        that they agree, so the tested path IS the shipped path."""
+        proc = subprocess.run(
+            [sys.executable, str(RAILWAY_DEPLOY_PY), "assert", "dep-older"],
+            input=json.dumps(REAL_SHAPE), capture_output=True, text=True)
+        assert proc.returncode == rdep.EXIT_OK
+        assert "dep-newest" in proc.stdout
+
+
+# ─── the wiring: the gate's meaning lives in the YAML, not the helper ─────
+
+
+class TestDeploymentAdvancedGateIsWired:
+    """Deleting the capture step, renaming its id, or typoing the expression
+    makes PREV_ID expand to "" — GitHub does not error on an unresolvable step
+    output. The two-month bug then returns with every helper test still green.
+    """
+
+    @staticmethod
+    def _steps():
+        wf = yaml.safe_load(WORKFLOW_PATH.read_text())
+        job = wf["jobs"]["deploy"]
+        return job["steps"]
+
+    def _idx(self, pred):
+        for i, st in enumerate(self._steps()):
+            if pred(st):
+                return i
+        return -1
+
+    def test_capture_step_exists_and_uses_newest_id(self):
+        i = self._idx(lambda s: s.get("id") == "prev_deploy")
+        assert i >= 0, "capture step (id: prev_deploy) is missing"
+        assert "railway_deployment.py newest-id" in self._steps()[i]["run"]
+
+    def test_capture_step_fails_closed(self):
+        run = self._steps()[self._idx(lambda s: s.get("id") == "prev_deploy")]["run"]
+        assert "exit 1" in run, "capture must fail the job when it cannot read a baseline"
+        assert "pipefail" in run, "without pipefail the railway failure is masked"
+
+    def test_verdict_step_receives_the_captured_id(self):
+        st = self._steps()[self._idx(lambda s: s.get("id") == "deploy_status")]
+        assert st["env"]["PREV_ID"] == "${{ steps.prev_deploy.outputs.prev_id }}"
+        assert 'railway_deployment.py assert "$PREV_ID"' in st["run"]
+
+    def test_verdict_step_refuses_an_empty_prev_id(self):
+        run = self._steps()[self._idx(lambda s: s.get("id") == "deploy_status")]["run"]
+        assert '-z "$PREV_ID"' in run, "an unwired PREV_ID must be refused, not judged"
+
+    def test_step_order_capture_deploy_verdict_then_health(self):
+        cap = self._idx(lambda s: s.get("id") == "prev_deploy")
+        dep = self._idx(lambda s: s.get("name") == "Deploy")
+        ver = self._idx(lambda s: s.get("id") == "deploy_status")
+        hc = self._idx(lambda s: s.get("id") == "health_check")
+        assert cap < dep < ver < hc, f"order wrong: {cap} {dep} {ver} {hc}"
+
+    def test_rollback_gates_on_crashed_only_never_on_unreadable_or_timeout(self):
+        """`railway down` deletes the newest deployment. Firing it on an
+        unreadable poll or a timeout deletes a HEALTHY container."""
+        i = self._idx(lambda s: "railway down" in str(s.get("run", "")))
+        assert i >= 0, "rollback step missing"
+        cond = self._steps()[i]["if"]
+        assert "verdict == 'crashed'" in cond, f"rollback must gate on crashed only: {cond}"
+        assert "health_check.outcome" not in cond, "health must not arm the rollback"
+
+    def test_health_probe_is_not_the_verdict(self):
+        """It polls the service DOMAIN, which the previous container answers."""
+        hc = self._steps()[self._idx(lambda s: s.get("id") == "health_check")]
+        assert "secondary" in hc["name"].lower()
+
+    def test_summary_reports_the_authoritative_verdict(self):
+        run = str(self._steps()[self._idx(
+            lambda s: s.get("name") == "Deployment summary")]["run"])
+        assert "DEPLOY_VERDICT" in run, "summary must surface the deploy verdict"
+        assert "secondary" in run.lower(), "health must be labelled secondary"
+
+    def test_summary_does_not_interpolate_the_domain_into_bash(self):
+        """${{ }} is substituted before bash parses; the domain comes from
+        railway status JSON with no charset validation."""
+        st = self._steps()[self._idx(lambda s: s.get("name") == "Deployment summary")]
+        assert "${{ steps.health_check.outputs.url }}" not in str(st["run"]), \
+            "domain must reach bash via env:, not ${{ }} interpolation"
+        assert st["env"]["HEALTH_URL"] == "${{ steps.health_check.outputs.url }}"

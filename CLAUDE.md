@@ -140,5 +140,32 @@ Secrets this repo needs and where they live:
 | `RAILWAY_TOKEN` | `deploy-mcp.yml` (Railway deploy + post-deploy /health poll) | (set in Railway dashboard; mirror to Infisical when convenient) | ✅ |
 | `OPENAI_API_KEY` (optional) | LightRAG production embeddings (only when running `make lightrag-ingest-prod`) | not yet in Infisical — add when needed | ❌ |
 | `JINA_API_KEY` (optional) | LightRAG production reranker (Chinese+English TCM) | not yet in Infisical — add when needed | ❌ |
+| `KG_MCP_API_KEY` (client) / `MCP_API_KEY` (gateway) | `shrine-diet-bioactivity/eval/mcp_clients.py`; validated by `mcp/src/kg_mcp/auth.py` | **currently** project `589d1e3b-…`, env `prod`, path `/research/shrine-diet-bioactivity` — see note below | ❌ (gateway reads it from Railway env) |
 
-**Rotating any of these:** update Infisical first, then `printf '%s' "$VAL" | gh secret set NAME --repo Syntropy-Health/shrine-open-diet --body -` to re-mirror, then update Railway dashboard. Never let the three stores drift.
+### `KG_MCP_API_KEY` — two names, and a location decision still open
+
+**Two env-var names, one secret value.** The client sends `KG_MCP_API_KEY`; the
+gateway validates `MCP_API_KEY` (`mcp/src/kg_mcp/auth.py`). There is no vendor to
+revoke at — **rotating it means changing the value the GATEWAY accepts (Railway
+env), not the source of truth.** Updating Infisical alone leaves the old value
+working, which reports as a completed rotation while the credential stays live.
+
+**Current actual location: project `589d1e3b-…`, `prod`, `/research/shrine-diet-bioactivity`.**
+Recorded as measured, not as intended. The folders there had to be created — this
+app's other secrets live in `687cab01-…`, and consolidating into it is blocked on
+project membership as of 2026-08-28. Until that is resolved, **an agent granted
+READ on `687cab01` alone cannot read this key.**
+
+That distinction is the point of this note. An earlier relay inferred this key's
+home from the neighbouring `NEO4J_*` row and reported it as documented — the row
+existed, but for a different secret. A table that documents four secrets and omits
+the fifth gives the next reader no way to tell an omission from a location, so
+this row states where the key IS, and flags that where it SHOULD live is undecided.
+Do not "correct" this row to `687cab01` until the value has actually moved.
+
+History: the literal was committed to this PUBLIC repo 2026-05-26 and rotated
+2026-08-27 after ~3 months of exposure. Verified by pair-test, not by a deploy
+badge: old key -> 401 stable across 6 samples, `NONE` control -> 401, new key
+authenticates.
+
+**Rotating any of these:** update Infisical first, then `printf '%s' "$VAL" | gh secret set NAME --repo Syntropy-Health/shrine-diet-bioactivity --body -` to re-mirror, then update Railway dashboard. Never let the three stores drift.
