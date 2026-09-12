@@ -141,6 +141,37 @@ async def test_initialize_creates_vector_index_with_dim(storage):
     assert kwargs["dim"] == 4
 
 
+@pytest.mark.asyncio
+async def test_initialize_recreates_stale_dim_index(storage):
+    # A pre-existing index at a DIFFERENT dim must be dropped + recreated, not left
+    # in place by IF NOT EXISTS (the shadow-index bug: a 2048 index silently shadowed
+    # 1024 vectors so queryNodes failed on a dim mismatch, measured 2026-09-11).
+    driver, session = _make_async_session_mock()
+    session.run.return_value.single = AsyncMock(
+        return_value={"options": {"indexConfig": {"vector.dimensions": 2048}}}
+    )
+    storage._driver = driver
+    await storage.initialize()
+    calls = [c.args[0] for c in session.run.call_args_list]
+    assert any("SHOW VECTOR INDEXES" in c for c in calls)
+    assert any("DROP INDEX" in c and "vec_unified_diet_kg_entities" in c for c in calls)
+    assert any("CREATE VECTOR INDEX" in c for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_initialize_keeps_matching_dim_index(storage):
+    # An existing index at the SAME dim must NOT be needlessly dropped.
+    driver, session = _make_async_session_mock()
+    session.run.return_value.single = AsyncMock(
+        return_value={"options": {"indexConfig": {"vector.dimensions": 4}}}
+    )
+    storage._driver = driver
+    await storage.initialize()
+    calls = [c.args[0] for c in session.run.call_args_list]
+    assert not any("DROP INDEX" in c for c in calls)
+    assert any("CREATE VECTOR INDEX" in c for c in calls)
+
+
 # ─── upsert ───────────────────────────────────────────────────────────────
 
 

@@ -113,9 +113,19 @@ class ScopedNeo4JVectorStorage(BaseVectorStorage):
         return self._driver
 
     async def initialize(self) -> None:
-        """Create the per-namespace vector index if it doesn't exist."""
+        """Create the per-namespace vector index, HEALING a stale wrong-dim index.
+
+        Neo4j's ``CREATE VECTOR INDEX ... IF NOT EXISTS`` is a NO-OP when an index of
+        the same name already exists — *even if that index has a different
+        dimensionality*. A stale index (e.g. left by a prior ingest at another
+        embedding dim; a dropped-nodes shape leaves its index behind) then silently
+        shadows the current vectors: inserts succeed but
+        ``db.index.vector.queryNodes`` fails with a dim mismatch (measured 2026-09-11:
+        a 2048-dim index shadowed 1024-dim gemini vectors). So detect a dim mismatch
+        and drop+recreate rather than trusting IF-NOT-EXISTS.
+        """
         driver = self._get_driver()
-        cypher = (
+        create_cypher = (
             f"CREATE VECTOR INDEX {self._index_name} IF NOT EXISTS "
             f"FOR (n:`{self._vector_label}`) ON (n.embedding) "
             "OPTIONS {indexConfig: {"
@@ -124,7 +134,24 @@ class ScopedNeo4JVectorStorage(BaseVectorStorage):
             "}}"
         )
         async with driver.session() as session:
-            await session.run(cypher, dim=self._embedding_dim)
+            result = await session.run(
+                "SHOW VECTOR INDEXES YIELD name, options "
+                "WHERE name = $name RETURN options AS options",
+                name=self._index_name,
+            )
+            rec = await result.single()
+            existing_dim = None
+            if rec is not None:
+                opts = rec["options"] or {}
+                existing_dim = (opts.get("indexConfig") or {}).get("vector.dimensions")
+            if existing_dim is not None and int(existing_dim) != int(self._embedding_dim):
+                logger.warning(
+                    f"[{self.workspace}] Vector index {self._index_name} has STALE dim "
+                    f"{existing_dim} != embedder dim {self._embedding_dim}; "
+                    f"dropping and recreating so queries do not fail on a dim mismatch."
+                )
+                await session.run(f"DROP INDEX {self._index_name} IF EXISTS")
+            await session.run(create_cypher, dim=self._embedding_dim)
         logger.info(
             f"[{self.workspace}] Vector index {self._index_name} ensured "
             f"({self._vector_label}.embedding, dim={self._embedding_dim})"
