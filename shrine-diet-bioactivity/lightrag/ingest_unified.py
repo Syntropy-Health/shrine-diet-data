@@ -333,6 +333,12 @@ async def main() -> None:
         help="Config profile (default: local)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print counts without writing")
+    parser.add_argument(
+        "--allow-shrink",
+        action="store_true",
+        help="Bypass the additive-only guard (#233b). Only for an intentional "
+        "replacing re-ingest — a shrink otherwise kills the six chain tools.",
+    )
     parser.add_argument("--max-herbs", type=int, default=None, help="Max herbs to ingest")
     parser.add_argument("--max-compounds", type=int, default=None, help="Max compounds to ingest")
     parser.add_argument("--max-foods", type=int, default=None, help="Max foods to ingest")
@@ -518,6 +524,25 @@ async def main() -> None:
                 host=embedding_host,
             ),
         )
+    elif embedding_binding in ("vertex", "aistudio", "local"):
+        # T4.0 pluggable embedder arm: bge-m3 (local) vs Gemini (vertex/aistudio),
+        # one interface behind embedder_adapters.make_embedder. LLM func stays the
+        # shared local/openrouter one — embedder and LLM are independent.
+        from embedder_adapters import make_embedder, to_embedding_func
+
+        llm_func = lightrag_init.make_llm_func()
+        # Pass the ALREADY-RESOLVED model/dim/host so the adapter uses the same values
+        # that stamp WorkspaceMeta via assert_workspace_embedding (no dual source of
+        # truth). Build the adapter ONCE (a second make_embedder would construct a
+        # second genai.Client just to print its name).
+        _adapter = make_embedder(
+            embedding_binding,
+            model=embedding_model,
+            dim=embedding_dim,
+            base_url=embedding_host,
+        )
+        embed_func = to_embedding_func(_adapter)
+        print(f"Embedder adapter: {_adapter.name}")
     else:
         # Shared openai-binding LLM func (LLM_MODEL from env) with the
         # json_object -> json_schema response_format shim for local
@@ -557,19 +582,48 @@ async def main() -> None:
     print(f"  Graph storage: {graph_storage}")
     print(f"  Workspace: {workspace}")
 
+    # Router guard (pre-emptive): refuse a local (bge-m3) embedder against a
+    # production workspace BEFORE any WorkspaceMeta is written — the deployed
+    # gateway cannot reach a local embedder at query time. Only meaningful for
+    # the adapter-owned bindings; ollama/native paths are unaffected.
+    if embedding_binding in ("vertex", "aistudio", "local", "openai"):
+        from embedder_adapters import assert_binding_allowed_for_workspace
+
+        assert_binding_allowed_for_workspace(embedding_binding, workspace)
+
     # Workspace <-> embedding-space guard: refuse to ingest vectors of a
     # different embedding model/dim into a Neo4j-backed workspace.
     # Case-insensitive so a storage-class rename (Neo4j vs Neo4J) cannot make
     # the guard silently fail-open.
-    if "neo4j" in vector_storage.lower():
+    neo4j_backed = "neo4j" in vector_storage.lower()
+    _neo4j_conn = (
+        os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+        os.getenv("NEO4J_USERNAME", "neo4j"),
+        os.getenv("NEO4J_PASSWORD", ""),
+    )
+    if neo4j_backed:
         lightrag_init.assert_workspace_embedding(
             model=embedding_model,
             dim=embedding_dim,
-            neo4j_uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
-            user=os.getenv("NEO4J_USERNAME", "neo4j"),
-            password=os.getenv("NEO4J_PASSWORD", ""),
+            neo4j_uri=_neo4j_conn[0],
+            user=_neo4j_conn[1],
+            password=_neo4j_conn[2],
             workspace=workspace,
         )
+
+    # Additive-only guard (#233b): snapshot the workspace BEFORE writing so a
+    # replacing re-ingest (which would delete chain-tool nodes/edges) fails
+    # closed at the end. Only meaningful for a persistent Neo4j workspace.
+    additive_before = None
+    if neo4j_backed and not args.dry_run:
+        from neo4j import GraphDatabase
+
+        import additive_guard
+
+        _guard_driver = GraphDatabase.driver(_neo4j_conn[0], auth=_neo4j_conn[1:])
+        with _guard_driver.session() as _s:
+            additive_before = additive_guard.snapshot_workspace_counts(_s, workspace)
+        _guard_driver.close()
 
     rag = LightRAG(
         working_dir=working_dir,
@@ -643,6 +697,34 @@ async def main() -> None:
     print(f"{'=' * 50}")
 
     await rag.finalize_storages()
+
+    # Additive-only guard (#233b): compare post-ingest counts to the pre-ingest
+    # snapshot. A DECREASE means the ingest replaced rather than added, which
+    # kills the six Layer-B chain tools; fail closed unless --allow-shrink.
+    # NOTE: this is a post-commit DETECTOR, not a preventer. The after-snapshot
+    # runs after finalize_storages(), so a genuinely replacing ingest has already
+    # committed by the time SystemExit fires — the exit is an alarm to trigger a
+    # restore, not a rollback. The design bet is that the normal ingest path only
+    # MERGEs (LightRAG keys entity nodes by id, so typed labels/edges persist and
+    # counts never drop); the guard exists to catch the day that assumption breaks.
+    if additive_before is not None:
+        from neo4j import GraphDatabase
+
+        import additive_guard
+
+        _guard_driver = GraphDatabase.driver(_neo4j_conn[0], auth=_neo4j_conn[1:])
+        try:
+            with _guard_driver.session() as _s:
+                additive_after = additive_guard.snapshot_workspace_counts(_s, workspace)
+        finally:
+            _guard_driver.close()
+        # evaluate_additive computes the diff once, raises SystemExit on a shrink
+        # unless --allow-shrink, and otherwise returns the outcome line.
+        print(
+            additive_guard.evaluate_additive(
+                additive_before, additive_after, allow_shrink=args.allow_shrink
+            )
+        )
 
     # Post-ingestion: add entity_type as Neo4j labels for visual exploration
     if graph_storage == "Neo4JStorage":

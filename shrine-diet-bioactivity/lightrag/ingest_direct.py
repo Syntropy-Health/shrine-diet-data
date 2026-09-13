@@ -32,6 +32,7 @@ from entity_schema import (
     QUERY_BUILDERS,
     RELATIONSHIP_TYPES,
     describe_relationship,
+    evidence_tier_for,
     safe_label,
 )
 from extra_sources import (
@@ -142,6 +143,10 @@ def extract_duke_relationships(
                 "weight": 1.0,
                 "file_path": file_path_label,
                 "source_id": f"duke:{rel_type.lower()}",
+                # T4.2 (#233b): populate the structured evidence_tier the chain
+                # tools read off the wire — previously dropped (only in the
+                # description text), leaving r.evidence_tier empty on Aura (7466).
+                "evidence_tier": evidence_tier_for(rel_type, row),
             }
         )
     return rels

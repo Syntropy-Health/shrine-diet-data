@@ -178,7 +178,7 @@ Agent synthesizes response with source attribution
 | Decision | Choice | Alternatives | Rationale |
 |----------|--------|--------------|-----------|
 | Graph DB | Neo4j (Railway) | Kuzu (embedded), FalkorDB | User has running Railway instance; Graphiti supports it natively |
-| Embeddings | Local LM Studio (embeddinggemma-300m-qat) | OpenAI API, Voyage | Zero cost; OpenAI-compatible endpoint |
+| Embeddings | Local LM Studio (embeddinggemma-300m-qat) | OpenAI API, Gemini/Vertex AI | Zero cost; OpenAI-compatible endpoint |
 | Graphiti integration | Python submodule | npm package, REST API | Graphiti is Python-native; TypeScript MCP server is separate concern |
 | Data manifest format | YAML with JSON Schema | SQL migrations, Python dicts | Human-readable, versionable, tooling-friendly |
 | Dedup strategy | Compound name normalization + PubChem CID | InChI key, SMILES | Matches existing normalizeCompoundName() pattern; PubChem CID as fallback |
@@ -366,7 +366,7 @@ Phases 2 and 3 can run in parallel — Phase 2 works on SQLite schema/data while
 | Decision | Choice | Alternatives | Rationale |
 |----------|--------|--------------|-----------|
 | Graph DB for experiment | Neo4j on Railway | Kuzu (embedded), FalkorDB, local Docker Neo4j | User has running Railway instance; validates cloud deployment path |
-| Embeddings | Local LM Studio (embeddinggemma-300m-qat) | OpenAI API, Voyage AI | Zero cost; sufficient quality for experiment |
+| Embeddings | Local LM Studio (embeddinggemma-300m-qat) | OpenAI API, Gemini/Vertex AI | Zero cost; sufficient quality for experiment |
 | Graphiti integration | Git submodule | pip install, Docker | Submodule allows local development and version pinning |
 | Manifest format | YAML | JSON, TOML, Python config | Human-readable, supports comments, widely tooled |
 | Skip BATMAN-TCM | Yes (no bulk download) | Scrape, contact authors | Access risk too high; CTD + HERB 2.0 cover the target-disease gap |

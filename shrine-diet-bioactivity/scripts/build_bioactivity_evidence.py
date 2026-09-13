@@ -26,7 +26,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "lightrag"))
 
-from chembl_extractor import extract_bioactivities_for_inchikeys  # noqa: E402
+from chembl_extractor import (  # noqa: E402
+    extract_bioactivities_for_inchikeys,
+    filter_min_independent_docs,
+)
 
 INSERT_SQL = """
 INSERT INTO bioactivity_evidence (
@@ -72,6 +75,16 @@ def _build_argparser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--min-pchembl", type=float, default=5.0)
     ap.add_argument("--min-confidence", type=int, default=5)
+    ap.add_argument(
+        "--min-independent-docs",
+        type=int,
+        default=2,
+        help="Keep only (compound,target) pairs backed by >= N distinct ChEMBL "
+        "doc_ids (independent-publication corroboration; guards PAINS/promiscuous "
+        "compounds). Set 1 to require just a single publication — note a pair whose "
+        "activities all have a NULL doc_id is dropped even then (no value fully "
+        "disables the guard, since a NULL doc is not an independent source).",
+    )
     return ap
 
 
@@ -112,7 +125,19 @@ def main() -> int:
         min_confidence=args.min_confidence,
     )
     chembl_conn.close()
-    print(f"Got {len(bioactivities)} bioactivity rows passing filters")
+    print(f"Got {len(bioactivities)} bioactivity rows passing pchembl/confidence filters")
+
+    # Third specificity guard (#233b): require >= N independent doc_ids per
+    # (compound, target) pair. Report what it removes rather than dropping silent.
+    bioactivities, doc_stats = filter_min_independent_docs(
+        bioactivities, min_independent_docs=args.min_independent_docs
+    )
+    print(
+        f"Independent-docs guard (>={doc_stats['min_independent_docs']} distinct "
+        f"doc_ids/pair): kept {doc_stats['rows_kept']}/{doc_stats['rows_in']} rows, "
+        f"{doc_stats['pairs_kept']}/{doc_stats['pairs_in']} pairs "
+        f"(dropped {doc_stats['rows_dropped']} rows on thin evidence)"
+    )
 
     now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
     inserted = 0

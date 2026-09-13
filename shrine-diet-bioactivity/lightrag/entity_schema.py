@@ -946,3 +946,31 @@ def describe_relationship(rel_type: str, row: dict[str, Any]) -> tuple[str, str]
         return desc, "synergy combination interaction enhancement potentiation"
 
     return f"{src} relates to {tgt}", rel_type.lower().replace("_", " ")
+
+
+def evidence_tier_for(rel_type: str, row: dict[str, Any]) -> str:
+    """Structured evidence tier for a relationship edge — the chain-tool wire
+    property ``r.evidence_tier`` (read by scoped_server ``/traverse``; #233b/T4.2).
+
+    Normalised but source-faithful:
+    - a MEASURED assay activity -> ``"assay"`` (TARGETS_PROTEIN's activity_value,
+      HAS_EVIDENCE's pchembl);
+    - a curated clinical/regulatory layer is passed through VERBATIM so the panel
+      can show it (ASSOCIATED_WITH_DISEASE's evidence_layer, e.g. ``"Approved"``,
+      ``"Phase 2"``, ``"Investigative"``);
+    - present-but-unmeasured -> ``"annotated"``;
+    - edges with no structured evidence (symptom/food/contains) -> ``""``.
+
+    HERB2 ASSOCIATED_WITH_DISEASE rows carry their own clinical/experimental/
+    traditional tier already and are populated at their build site, not here.
+    """
+    if rel_type in ("TARGETS_PROTEIN", "HAS_EVIDENCE"):
+        measured = (
+            row.get("activity_value")
+            if rel_type == "TARGETS_PROTEIN"
+            else row.get("pchembl")
+        )
+        return "assay" if measured not in (None, "") else "annotated"
+    if rel_type == "ASSOCIATED_WITH_DISEASE":
+        return str(row.get("evidence") or "").strip() or "annotated"
+    return ""

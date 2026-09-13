@@ -172,6 +172,12 @@ jobs:
     needs: [detect-environment, docker-build]
     environment:
       name: ${{ needs.detect-environment.outputs.environment }}
+    # `secrets` context is NOT allowed in a step-level `if:` (it is a startup
+    # validation error — the whole workflow fails to compile, producing a run
+    # with zero jobs). Promote the existence check to a job-level env, which MAY
+    # reference secrets, then gate the Braintrust step on `env.HAS_BRAINTRUST`.
+    env:
+      HAS_BRAINTRUST: ${{ secrets.BRAINTRUST_API_KEY != '' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -202,7 +208,7 @@ jobs:
         # passes through shell expansion — safer against rotation to a key
         # format that contains $ / backtick / newline. BRAINTRUST_PROJECT
         # is a static literal and uses the simpler `--set` form.
-        if: ${{ secrets.BRAINTRUST_API_KEY != '' }}
+        if: ${{ env.HAS_BRAINTRUST == 'true' }}
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           ENV_NAME: ${{ needs.detect-environment.outputs.environment }}
