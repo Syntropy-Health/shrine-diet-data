@@ -131,3 +131,46 @@ def test_evidence_tier_lands_on_typed_edge():
             list(s.run(f"MATCH (n:`{ws}`) DETACH DELETE n"))
         conn.close()
         d.close()
+
+
+# ---- wiring: the row CARRIES the key, and the edge SET persists it (no real DB) ----
+
+@pytest.mark.unit
+def test_extract_emits_evidence_tier_key_inmemory():
+    # Guards the row-emission (ingest_direct: "evidence_tier": evidence_tier_for(...))
+    # WITHOUT the multi-GB real DB, so deleting that line fails on a clean CI checkout
+    # (previously only a skip-prone real-DB test covered it).
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE compounds (id INTEGER PRIMARY KEY, name TEXT)")
+    conn.execute(
+        "CREATE TABLE bioactivity_evidence "
+        "(id INTEGER PRIMARY KEY, compound_id INTEGER, pchembl REAL, activity_type TEXT)"
+    )
+    conn.execute("INSERT INTO compounds VALUES (1, 'Curcumin')")
+    conn.execute("INSERT INTO bioactivity_evidence VALUES (1, 1, 6.1, 'IC50')")
+    conn.commit()
+    rels = extract_duke_relationships(conn, "HAS_EVIDENCE", 10)
+    conn.close()
+    assert rels, "expected a HAS_EVIDENCE row from the seed"
+    assert all("evidence_tier" in r for r in rels)   # the KEY is emitted on the row
+    assert rels[0]["evidence_tier"] == "assay"        # pchembl present -> assay
+
+
+@pytest.mark.unit
+def test_upsert_relationships_sets_evidence_tier_on_wire_edge():
+    # Guards the SET r.evidence_tier = row.evidence_tier clause — the one that actually
+    # lands the tier on the typed edge scoped_server /traverse reads. Mock the sync
+    # session so no Neo4j is needed (the aura arm is routinely skipped).
+    from unittest.mock import MagicMock
+    session = MagicMock()
+    rels = [{
+        "src_id": "Curcumin", "tgt_id": "1", "rel_type": "HAS_EVIDENCE",
+        "description": "d", "keywords": "k", "weight": 1.0,
+        "file_path": "f", "source_id": "s", "evidence_tier": "assay",
+    }]
+    n = upsert_relationships(session, rels, "unified_diet_kg", scope="shared")
+    assert n == 1
+    cyphers = [c.args[0] for c in session.run.call_args_list]
+    assert any("r.evidence_tier = row.evidence_tier" in c for c in cyphers)
+    payloads = [c.kwargs.get("rows") for c in session.run.call_args_list if c.kwargs.get("rows")]
+    assert any(any(row.get("evidence_tier") == "assay" for row in rp) for rp in payloads)

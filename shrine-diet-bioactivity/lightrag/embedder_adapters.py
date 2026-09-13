@@ -186,36 +186,51 @@ class LocalOpenAICompatAdapter(EmbedderAdapter):
 ADAPTER_BINDINGS = frozenset({"local", "openai", "vertex", "aistudio"})
 
 
-def make_embedder(binding: str | None = None) -> EmbedderAdapter:
+def make_embedder(
+    binding: str | None = None,
+    *,
+    model: str | None = None,
+    dim: int | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> EmbedderAdapter:
     """Construct the adapter for ``binding`` (default: env EMBEDDING_BINDING, else 'local').
+
+    Pass ``model``/``dim`` to use them verbatim (e.g. the caller's already-resolved
+    EMBEDDING_MODEL/EMBEDDING_DIM). This matters because the caller stamps
+    ``WorkspaceMeta`` from those same resolved values via ``assert_workspace_embedding``:
+    if this factory re-read env with its OWN defaults instead, an unset EMBEDDING_MODEL
+    would desync the embedding-space guard from the embedder actually used. When
+    ``model``/``dim`` are None the per-binding env defaults apply (standalone use).
 
     Raises ValueError for a binding this factory does not own (e.g. 'ollama'), so the
     caller routes it to the native path rather than silently getting the wrong embedder.
     """
     binding = (binding or os.getenv("EMBEDDING_BINDING", "local")).lower()
-    model = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
-    dim = int(os.getenv("EMBEDDING_DIM", "768"))
+    dim = int(dim if dim is not None else os.getenv("EMBEDDING_DIM", "768"))
 
     if binding in ("local", "openai"):
         return LocalOpenAICompatAdapter(
-            model=os.getenv("EMBEDDING_MODEL", "text-embedding-bge-m3"),
+            model=model or os.getenv("EMBEDDING_MODEL", "text-embedding-bge-m3"),
             dim=dim,
-            base_url=os.getenv("EMBEDDING_BINDING_HOST", "http://localhost:1234/v1"),
-            api_key=os.getenv("EMBEDDING_BINDING_API_KEY"),
+            base_url=base_url or os.getenv("EMBEDDING_BINDING_HOST", "http://localhost:1234/v1"),
+            api_key=api_key if api_key is not None else os.getenv("EMBEDDING_BINDING_API_KEY"),
         )
+    resolved_model = model or os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
     if binding == "vertex":
         return GeminiVertexAdapter(
-            model=model,
+            model=resolved_model,
             dim=dim,
             project=os.getenv("GOOGLE_CLOUD_PROJECT", "syntropy-passport"),
             location=os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1"),
         )
     if binding == "aistudio":
         return GeminiAIStudioAdapter(
-            model=model,
+            model=resolved_model,
             dim=dim,
             api_key=(
-                os.getenv("EMBEDDING_BINDING_API_KEY")
+                api_key
+                or os.getenv("EMBEDDING_BINDING_API_KEY")
                 or os.getenv("GEMINI_API_KEY")
                 or os.getenv("GOOGLE_AI_STUDIO_API_KEY")
                 or ""
@@ -228,9 +243,10 @@ def make_embedder(binding: str | None = None) -> EmbedderAdapter:
 
 
 # Bindings whose embedder is reachable from the deployed gateway at QUERY time.
-# The local (bge-m3) binding is unreachable from Railway, so a production
-# workspace queried by the deployed gateway must not be bound to it.
-HOSTED_BINDINGS = frozenset({"vertex", "aistudio"})
+# vertex/aistudio (Gemini) and openai (OpenRouter/OpenAI) are all hosted APIs the
+# Railway gateway can reach; only `local` (bge-m3 on localhost) is unreachable, so it
+# is the one binding a production workspace must not be bound to.
+HOSTED_BINDINGS = frozenset({"vertex", "aistudio", "openai"})
 
 # Workspaces the deployed gateway queries. Their embedding space MUST be a hosted
 # embedder, or the semantic shape is queryable only from this machine.
@@ -265,6 +281,14 @@ def assert_binding_allowed_for_workspace(binding: str | None, workspace: str) ->
 # module-level function is deepcopy-atomic (copied by reference), so the func field
 # survives asdict — the same reason the ollama/openai paths pass a partial over a
 # module-level function rather than a bound method.
+#
+# ⚠ ONE active adapter PER PROCESS: to_embedding_func overwrites this single global,
+# so the last call wins for every EmbeddingFunc handed out. That is safe for ingest
+# (one binding per process) and for the T4.0 benchmark (each arm runs as its own
+# subprocess via run_semantic_ingest.sh → exec). Do NOT build two adapters in one
+# process and expect both EmbeddingFuncs to stay independent — the first would start
+# using the second adapter. If that use case ever arises, bind the adapter into a
+# closure/instance instead of this module global.
 _ACTIVE_ADAPTER: EmbedderAdapter | None = None
 
 

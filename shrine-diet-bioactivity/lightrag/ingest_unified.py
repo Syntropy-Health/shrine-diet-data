@@ -531,8 +531,18 @@ async def main() -> None:
         from embedder_adapters import make_embedder, to_embedding_func
 
         llm_func = lightrag_init.make_llm_func()
-        embed_func = to_embedding_func(make_embedder(embedding_binding))
-        print(f"Embedder adapter: {make_embedder(embedding_binding).name}")
+        # Pass the ALREADY-RESOLVED model/dim/host so the adapter uses the same values
+        # that stamp WorkspaceMeta via assert_workspace_embedding (no dual source of
+        # truth). Build the adapter ONCE (a second make_embedder would construct a
+        # second genai.Client just to print its name).
+        _adapter = make_embedder(
+            embedding_binding,
+            model=embedding_model,
+            dim=embedding_dim,
+            base_url=embedding_host,
+        )
+        embed_func = to_embedding_func(_adapter)
+        print(f"Embedder adapter: {_adapter.name}")
     else:
         # Shared openai-binding LLM func (LLM_MODEL from env) with the
         # json_object -> json_schema response_format shim for local

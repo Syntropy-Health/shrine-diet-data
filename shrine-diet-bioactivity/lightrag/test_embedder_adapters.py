@@ -100,13 +100,109 @@ def test_local_binding_allowed_on_explore_workspace():
     assert assert_binding_allowed_for_workspace("local", "unified_diet_kg_explore") is None
 
 
-def test_embed_entrypoint_is_deepcopy_atomic():
-    # LightRAG's constructor runs dataclasses.asdict(self) -> deepcopy over the
-    # embedding func. The func handed to it MUST be deepcopy-atomic: a module-level
-    # function copies by reference (is-identity), whereas a bound method deep-copies
-    # its __self__ (the adapter + its non-copyable genai client) and dies. This
-    # guards the fix without importing lightrag (dir-name shadows the pkg under pytest).
-    import copy
-    from embedder_adapters import _active_embed
+def test_to_embedding_func_hands_deepcopy_atomic_module_func(monkeypatch):
+    # The real regression is in to_embedding_func: it MUST hand LightRAG the
+    # module-level _active_embed (deepcopy-atomic), NOT adapter.embed (a bound method
+    # that dies under LightRAG's asdict->deepcopy). We stub lightrag.utils.EmbeddingFunc
+    # to capture what to_embedding_func passes, without importing the real (dir-name-
+    # shadowed) lightrag package under pytest.
+    import sys, types, copy
+    import embedder_adapters as ea
 
-    assert copy.deepcopy(_active_embed) is _active_embed  # module-level -> atomic
+    fake = types.ModuleType("lightrag.utils")
+
+    class _EF:
+        def __init__(self, embedding_dim, max_token_size, func):
+            self.embedding_dim = embedding_dim
+            self.max_token_size = max_token_size
+            self.func = func
+
+    fake.EmbeddingFunc = _EF
+    monkeypatch.setitem(sys.modules, "lightrag", types.ModuleType("lightrag"))
+    monkeypatch.setitem(sys.modules, "lightrag.utils", fake)
+
+    class _A(ea.EmbedderAdapter):
+        name = "t"; embedding_dim = 8
+        async def embed(self, texts):  # bound method — must NOT be what we hand over
+            return None
+
+    a = _A()
+    ef = ea.to_embedding_func(a)
+    assert ef.func is ea._active_embed          # module-level func, not a.embed
+    assert ef.func is not a.embed
+    assert copy.deepcopy(ef.func) is ef.func    # deepcopy-atomic (survives asdict)
+    assert ea._ACTIVE_ADAPTER is a              # and it registered the adapter
+
+
+def test_gemini_embed_rejects_count_mismatch_ragged_and_handles_empty():
+    # The docstring warns a reordered/length-mismatched result "silently misaligns
+    # every embedding downstream" — prove the guards raise, and empty -> (0, dim).
+    import asyncio
+    from unittest.mock import MagicMock
+    from embedder_adapters import GeminiVertexAdapter
+
+    a = GeminiVertexAdapter.__new__(GeminiVertexAdapter)   # skip __init__ (no genai client)
+    a._model = "gemini-embedding-001"; a.embedding_dim = 4; a.name = "vertex:test"
+    a._client = MagicMock()
+
+    # count mismatch: 2 inputs -> 1 embedding
+    a._client.models.embed_content.return_value = MagicMock(
+        embeddings=[MagicMock(values=[0.0] * 4)])
+    with pytest.raises(RuntimeError, match="count"):
+        asyncio.run(a.embed(["x", "y"]))
+
+    # ragged widths (4 vs 3)
+    a._client.models.embed_content.return_value = MagicMock(
+        embeddings=[MagicMock(values=[0.0] * 4), MagicMock(values=[0.0] * 3)])
+    with pytest.raises(RuntimeError, match="ragged"):
+        asyncio.run(a.embed(["x", "y"]))
+
+    # empty input -> zero-row matrix of the right width, no client call
+    out = asyncio.run(a.embed([]))
+    assert out.shape == (0, 4)
+
+
+def test_local_adapter_resorts_by_index_and_checks_length(monkeypatch):
+    # The local path must re-sort the response by `index` (a server that reorders would
+    # misalign the batch) and raise on a short response.
+    import asyncio
+    from embedder_adapters import LocalOpenAICompatAdapter
+
+    a = LocalOpenAICompatAdapter(model="m", dim=3, base_url="http://x/v1", api_key="k")
+
+    class _Resp:
+        _data = [{"index": 1, "embedding": [1, 1, 1]}, {"index": 0, "embedding": [0, 0, 0]}]
+        def raise_for_status(self): pass
+        def json(self): return {"data": self._data}
+
+    class _Client:
+        def __init__(self, resp): self._resp = resp
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **k): return self._resp
+
+    monkeypatch.setattr("httpx.AsyncClient", lambda *a, **k: _Client(_Resp()))
+    out = asyncio.run(a.embed(["t0", "t1"]))
+    assert out[0].tolist() == [0.0, 0.0, 0.0]   # re-sorted: index 0 first
+    assert out[1].tolist() == [1.0, 1.0, 1.0]
+
+    class _Short(_Resp):
+        _data = [{"index": 0, "embedding": [0, 0, 0]}]   # 1 for 2 inputs
+    monkeypatch.setattr("httpx.AsyncClient", lambda *a, **k: _Client(_Short()))
+    with pytest.raises(RuntimeError, match="got 1 embeddings"):
+        asyncio.run(a.embed(["t0", "t1"]))
+
+
+def test_router_guard_resolves_none_binding_from_env(monkeypatch):
+    # A None binding must resolve from EMBEDDING_BINDING (not fall through open).
+    from embedder_adapters import assert_binding_allowed_for_workspace
+    monkeypatch.setenv("EMBEDDING_BINDING", "local")
+    with pytest.raises(SystemExit, match="router-guard"):
+        assert_binding_allowed_for_workspace(None, "unified_diet_kg")
+
+
+def test_openai_binding_allowed_on_production_workspace():
+    # openai/OpenRouter is a HOSTED, reachable API -> allowed on the prod workspace
+    # (only local bge-m3 is unreachable and blocked).
+    from embedder_adapters import assert_binding_allowed_for_workspace
+    assert assert_binding_allowed_for_workspace("openai", "unified_diet_kg") is None

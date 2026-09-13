@@ -14,9 +14,11 @@ LG="${0:A:h}"                       # this script's dir = the lightrag dir
 cd "$LG"
 PY="${LRENV_PY:-/tmp/lrenv/bin/python}"   # a venv with lightrag-hku[api]==1.5.0 + neo4j + google-genai + httpx
 
-TOK=$(infisical login --method=universal-auth --client-id="$INFISICAL_UNIVERSAL_AUTH_CLIENT_ID" --client-secret="$INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET" --domain=https://app.infisical.com --plain --silent 2>/dev/null)
+# Deliver the Infisical token via env (INFISICAL_TOKEN), NOT --token= on argv, so it
+# is not visible in the process table (CWE-214). The `get` calls read it from env.
+export INFISICAL_TOKEN="$(infisical login --method=universal-auth --client-id="$INFISICAL_UNIVERSAL_AUTH_CLIENT_ID" --client-secret="$INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET" --domain=https://app.infisical.com --plain --silent 2>/dev/null)"
 APP=589d1e3b-5798-48ea-97c0-2d58086a375b; P=/research/shrine-diet-bioactivity
-g(){ infisical secrets get "$1" --projectId="$APP" --env=prod --path="$P" --token="$TOK" --domain=https://app.infisical.com --plain --silent 2>/dev/null; }
+g(){ infisical secrets get "$1" --projectId="$APP" --env=prod --path="$P" --domain=https://app.infisical.com --plain --silent 2>/dev/null; }
 export NEO4J_URI="$(g NEO4J_URI)" NEO4J_USERNAME="$(g NEO4J_USERNAME)" NEO4J_PASSWORD="$(g NEO4J_PASSWORD)" NEO4J_DATABASE="$(g NEO4J_DATABASE)"
 
 # --- production semantic track (see CHECKPOINT.md) ---
@@ -28,6 +30,10 @@ export EMBEDDING_FUNC_MAX_ASYNC=1 EMBEDDING_BATCH_NUM=10 MAX_PARALLEL_INSERT=1  
 export GOOGLE_CLOUD_PROJECT=syntropy-passport GOOGLE_CLOUD_LOCATION=us-central1
 export LLM_BINDING=openai LLM_BINDING_HOST=http://localhost:1234/v1 LLM_MODEL=google/gemma-4-12b-qat LLM_BINDING_API_KEY=lm-studio LLM_JSON_SCHEMA_COMPAT=1
 export WORKING_DIR="$LG/../data_local/rag_storage_semantic_core"   # preserved chunk cache
+# This IS the ingest path (about to (re)populate), so permit the vector-index heal to
+# drop+recreate a wrong-dim index. The deployed gateway does NOT set this, so a
+# misconfigured reader fails loud instead of destroying a valid index.
+export VECTOR_INDEX_ALLOW_RECREATE=1
 
 echo "=== semantic ingest resume $(date) — workspace=$WORKSPACE embedder=vertex/gemini-1024 ==="
 exec "$PY" -u ingest_unified.py --config local --batch-size 200 "$@"

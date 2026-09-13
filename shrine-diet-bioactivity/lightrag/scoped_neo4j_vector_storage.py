@@ -113,16 +113,23 @@ class ScopedNeo4JVectorStorage(BaseVectorStorage):
         return self._driver
 
     async def initialize(self) -> None:
-        """Create the per-namespace vector index, HEALING a stale wrong-dim index.
+        """Create the per-namespace vector index; heal a stale wrong-dim index ONLY on
+        an explicit ingest opt-in, else FAIL LOUD.
 
         Neo4j's ``CREATE VECTOR INDEX ... IF NOT EXISTS`` is a NO-OP when an index of
         the same name already exists — *even if that index has a different
         dimensionality*. A stale index (e.g. left by a prior ingest at another
-        embedding dim; a dropped-nodes shape leaves its index behind) then silently
-        shadows the current vectors: inserts succeed but
+        embedding dim) then silently shadows the current vectors: inserts succeed but
         ``db.index.vector.queryNodes`` fails with a dim mismatch (measured 2026-09-11:
-        a 2048-dim index shadowed 1024-dim gemini vectors). So detect a dim mismatch
-        and drop+recreate rather than trusting IF-NOT-EXISTS.
+        a 2048-dim index shadowed 1024-dim gemini vectors).
+
+        BUT ``initialize()`` also runs on the deployed gateway's READ path
+        (``scoped_server`` boot → ``initialize_storages``). Dropping there would let a
+        misconfigured reader (wrong ``EMBEDDING_DIM``) DESTROY a valid production index
+        and rebuild it at the wrong dim — turning a loud query error into silent empty
+        results for every correct reader. So drop+recreate is gated behind
+        ``VECTOR_INDEX_ALLOW_RECREATE`` (set only by the ingest path, which is about to
+        repopulate); on any other path a dim mismatch RAISES rather than drops.
         """
         driver = self._get_driver()
         create_cypher = (
@@ -132,6 +139,11 @@ class ScopedNeo4JVectorStorage(BaseVectorStorage):
             "`vector.dimensions`: $dim, "
             "`vector.similarity_function`: 'cosine'"
             "}}"
+        )
+        allow_recreate = os.getenv("VECTOR_INDEX_ALLOW_RECREATE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
         )
         async with driver.session() as session:
             result = await session.run(
@@ -145,10 +157,19 @@ class ScopedNeo4JVectorStorage(BaseVectorStorage):
                 opts = rec["options"] or {}
                 existing_dim = (opts.get("indexConfig") or {}).get("vector.dimensions")
             if existing_dim is not None and int(existing_dim) != int(self._embedding_dim):
+                if not allow_recreate:
+                    raise RuntimeError(
+                        f"[{self.workspace}] Vector index {self._index_name} has dim "
+                        f"{existing_dim} but this process embeds at dim {self._embedding_dim}. "
+                        f"Refusing to DROP a valid index on a read/boot path (that would destroy "
+                        f"it for correctly-configured readers and return silent empty results). "
+                        f"If this is an INGEST re-embedding at a new dim, set "
+                        f"VECTOR_INDEX_ALLOW_RECREATE=1 to heal; otherwise fix EMBEDDING_DIM."
+                    )
                 logger.warning(
-                    f"[{self.workspace}] Vector index {self._index_name} has STALE dim "
+                    f"[{self.workspace}] Vector index {self._index_name} STALE dim "
                     f"{existing_dim} != embedder dim {self._embedding_dim}; "
-                    f"dropping and recreating so queries do not fail on a dim mismatch."
+                    f"VECTOR_INDEX_ALLOW_RECREATE set — dropping and recreating."
                 )
                 await session.run(f"DROP INDEX {self._index_name} IF EXISTS")
             await session.run(create_cypher, dim=self._embedding_dim)
